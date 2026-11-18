@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<title>설문 집계기</title>
+</head>
+<body>
+
+<script id="tally-logic">
+// 계산 로직: 화면(DOM)과 무관한 순수 함수만 둔다. test/tally.test.js가 이 블록을 꺼내 시험한다.
+(function (root) {
+  'use strict';
+
+  var VALID = { '1': 1, '2': 2, '3': 3, '4': 4, '5': 5 };
+
+  // 엑셀이 클립보드에 넣는 탭 구분 텍스트를 줄 × 칸 배열로 바꾼다.
+  // 따옴표로 감싼 칸("…", 안의 "" 는 " 하나)과 \r\n · \n · \r 줄바꿈을 처리한다.
+  function parseTsv(text) {
+    var s = String(text == null ? '' : text);
+    if (s.charCodeAt(0) === 0xFEFF) s = s.slice(1);
+    var rows = [];
+    var row = [];
+    var cell = '';
+    var i = 0;
+    var n = s.length;
+    var atCellStart = true;
+
+    while (i < n) {
+      var ch = s[i];
+      if (atCellStart && ch === '"') {
+        // 따옴표 칸: 닫는 따옴표까지 읽는다.
+        i++;
+        while (i < n) {
+          if (s[i] === '"') {
+            if (s[i + 1] === '"') { cell += '"'; i += 2; continue; }
+            i++;
+            break;
+          }
+          cell += s[i++];
+        }
+        atCellStart = false;
+        continue;
+      }
+      atCellStart = false;
+      if (ch === '\t') {
+        row.push(cell); cell = ''; atCellStart = true; i++;
+      } else if (ch === '\r' || ch === '\n') {
+        row.push(cell); rows.push(row); row = []; cell = ''; atCellStart = true;
+        i += (ch === '\r' && s[i + 1] === '\n') ? 2 : 1;
+      } else {
+        cell += ch; i++;
+      }
+    }
+    if (!atCellStart || cell !== '' || row.length > 0) {
+      row.push(cell); rows.push(row);
+    }
+    // 끝에 붙은 빈 줄(탭 없이 비었거나 공백뿐인 줄)은 응답 줄이 아니다.
+    while (rows.length > 0) {
+      var last = rows[rows.length - 1];
+      if (last.length === 1 && last[0].trim() === '') rows.pop();
+      else break;
+    }
+    return rows;
+  }
+
+  // 칸 하나를 'valid' | 'blank' | 'excluded'로 판정한다.
+  function classifyCell(value) {
+    if (value == null) return { kind: 'blank' };
+    var t = String(value).trim();
+    if (t === '') return { kind: 'blank' };
+    if (Object.prototype.hasOwnProperty.call(VALID, t)) return { kind: 'valid', score: VALID[t] };
+    return { kind: 'excluded' };
+  }
+
+  // 합 ÷ 개수를 소수 셋째 자리에서 반올림해 둘째 자리까지. 개수가 0이면 "-".
+  // 정수만으로 계산해 부동소수 오차를 피한다: round(100·sum/count) = floor((200·sum + count) / (2·count)).
+  function formatAverage(sum, count) {
+    if (!count) return '-';
+    var hundredths = Math.floor((200 * sum + count) / (2 * count));
+    var whole = Math.floor(hundredths / 100);
+    var frac = hundredths % 100;
+    return whole + '.' + (frac < 10 ? '0' : '') + frac;
+  }
+
+  // 붙여넣은 글 전체를 집계한다.
+  function tally(text) {
+    var rows = parseTsv(text);
+    if (rows.length === 0) {
+      return { ok: false, error: 'empty', message: '붙여넣은 내용이 없습니다.' };
+    }
+    var header = rows[0];
+    if (header.length < 2) {
+      return { ok: false, error: 'no-questions', message: '문항 열이 없습니다. 첫 열(응답번호) 다음에 문항 열이 있어야 합니다.' };
+    }
+    var questions = [];
+    for (var c = 1; c < header.length; c++) {
+      var name = header[c].trim();
+      questions.push({ name: name === '' ? '(열 ' + (c + 1) + ')' : name, valid: 0, sum: 0, blank: 0, excluded: 0, average: '-' });
+    }
+    for (var r = 1; r < rows.length; r++) {
+      var row = rows[r];
+      for (var q = 0; q < questions.length; q++) {
+        var col = q + 1;
+        var res = classifyCell(col < row.length ? row[col] : null);
+        var item = questions[q];
+        if (res.kind === 'valid') { item.valid++; item.sum += res.score; }
+        else if (res.kind === 'blank') item.blank++;
+        else item.excluded++;
+      }
+    }
+    for (var k = 0; k < questions.length; k++) {
+      questions[k].average = formatAverage(questions[k].sum, questions[k].valid);
+    }
+    return { ok: true, responseCount: rows.length - 1, questions: questions };
+  }
+
+  root.SurveyTally = { parseTsv: parseTsv, classifyCell: classifyCell, formatAverage: formatAverage, tally: tally };
+})(globalThis);
+</script>
+
+</body>
+</html>
